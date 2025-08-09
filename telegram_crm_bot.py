@@ -382,8 +382,11 @@ async def cb_pick_trainer(call: CallbackQuery):
     )
     if tchat:
         try:
-            await bot.send_message(tchat, f"Новая заявка от клиента:
-{cid}. {cname} — {cphone}", reply_markup=kb)
+            await bot.send_message(
+                tchat,
+                f"Новая заявка от клиента:\n{cid}. {cname} — {cphone}",
+                reply_markup=kb
+            )
         except Exception:
             logger.exception('Не удалось отправить заявку тренеру')
     await call.message.edit_text(f"Заявка отправлена тренеру {tname}. Ожидайте подтверждения.")
