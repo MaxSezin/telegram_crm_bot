@@ -1,11 +1,15 @@
 """
 Telegram CRM для тренеров — Расширенный MVP с ролями и заявками (кнопки)
+Автор: сгенерировано ChatGPT
 
-- Роли: Тренер / Клиент (выбор при /start)
-- Клиент выбирает тренера → заявка тренеру (одобрить/отклонить)
-- У каждого тренера — своя база клиентов/сессий/платежей
-- Напоминания за 24ч и за 2ч тренеру и клиенту
-- Кнопки, FSM-формы, поиск, завершение сессии кнопкой, редактирование профиля, авто-слоты
+Ключевые возможности:
+- Разделение ролей: Тренер / Клиент (выбор при /start)
+- Для клиента: выбор тренера из списка, создание заявки, уведомление тренеру
+- Для тренера: список заявок (одобрить/отклонить), свои клиенты, расписание, платежи, статистика
+- Поддержка множества тренеров и их независимых групп клиентов
+- Напоминания за 24ч и 2ч — только соответствующему тренеру и клиенту
+- Полностью на кнопках (ReplyKeyboard + InlineKeyboard), формы через FSM
+- Дополнения: быстрый поиск тренера/клиента, завершение сессии кнопкой, редактирование профиля клиента, авто-слоты времени (сегодня/завтра 9/12/18)
 
 Зависимости:
     pip install aiogram==2.25 python-dateutil
@@ -89,7 +93,7 @@ cur.execute('''CREATE TABLE IF NOT EXISTS payments (
 )''')
 conn.commit()
 
-# Миграции
+# Миграции на случай старой БД
 try:
     cur.execute("ALTER TABLE clients ADD COLUMN trainer_id INTEGER")
 except Exception:
@@ -145,10 +149,7 @@ def get_trainer_chat_ids():
 def ensure_trainer(chat_id: int, name: str = None):
     cur.execute("SELECT id FROM trainers WHERE chat_id = ?", (chat_id,))
     if cur.fetchone() is None:
-        cur.execute(
-            "INSERT INTO trainers (chat_id, name, created_at) VALUES (?, ?, ?)",
-            (chat_id, name or 'trainer', datetime.utcnow().isoformat())
-        )
+        cur.execute("INSERT INTO trainers (chat_id, name, created_at) VALUES (?, ?, ?)", (chat_id, name or 'trainer', datetime.utcnow().isoformat()))
         conn.commit()
 
 
@@ -178,7 +179,7 @@ def build_trainers_kb(page: int = 0) -> InlineKeyboardMarkup:
     end = start + PER_PAGE
     rows = all_rows[start:end]
     kb = InlineKeyboardMarkup(row_width=1)
-    for tid, name, _ in rows:
+    for tid, name, tchat in rows:
         title = name or f"Тренер {tid}"
         kb.add(InlineKeyboardButton(f"{tid}. {title}", callback_data=f"pick_trainer:{tid}"))
     nav = []
@@ -233,7 +234,7 @@ def build_requests_kb(trainer_id: int, page: int = 0) -> InlineKeyboardMarkup:
     end = start + PER_PAGE
     rows = all_rows[start:end]
     kb = InlineKeyboardMarkup(row_width=2)
-    for cid, name, _ in rows:
+    for cid, name, phone in rows:
         kb.row(
             InlineKeyboardButton(f"{cid}. {name}", callback_data=f"client:{cid}"),
             InlineKeyboardButton('✅ Одобрить', callback_data=f"approve:{cid}")
@@ -381,11 +382,8 @@ async def cb_pick_trainer(call: CallbackQuery):
     )
     if tchat:
         try:
-            await bot.send_message(
-                tchat,
-                f"Новая заявка от клиента:\n{cid}. {cname} — {cphone}",
-                reply_markup=kb
-            )
+            await bot.send_message(tchat, f"Новая заявка от клиента:
+{cid}. {cname} — {cphone}", reply_markup=kb)
         except Exception:
             logger.exception('Не удалось отправить заявку тренеру')
     await call.message.edit_text(f"Заявка отправлена тренеру {tname}. Ожидайте подтверждения.")
@@ -406,10 +404,7 @@ async def my_sessions(message: types.Message):
     if not rows:
         await message.answer('Пока нет запланированных тренировок.', reply_markup=CLIENT_KB)
         return
-    text = "\n".join([
-        f"{r[0]}. {datetime.fromisoformat(r[1]).strftime('%d.%m.%Y %H:%M')} — {r[2]} — {r[3] or ''}"
-        for r in rows
-    ])
+    text = "\n".join([f"{r[0]}. {datetime.fromisoformat(r[1]).strftime('%d.%m.%Y %H:%M')} — {r[2]} — {r[3] or ''}" for r in rows])
     await message.answer(text, reply_markup=CLIENT_KB)
 
 @dp.message_handler(lambda m: m.text == '💸 Мой баланс')
@@ -611,8 +606,7 @@ async def add_client_notes(message: types.Message, state: FSMContext):
     notes = '' if message.text.strip() == '-' else message.text.strip()
     data = await state.get_data()
     tid = get_trainer_id_by_chat(message.chat.id)
-    cur.execute('INSERT INTO clients (name, phone, notes, trainer_id, status) VALUES (?, ?, ?, ?, ?)',
-                (data['name'], data['phone'], notes, tid, 'approved'))
+    cur.execute('INSERT INTO clients (name, phone, notes, trainer_id, status) VALUES (?, ?, ?, ?, ?)', (data['name'], data['phone'], notes, tid, 'approved'))
     conn.commit()
     cid = cur.lastrowid
     await state.finish()
@@ -632,21 +626,15 @@ async def cb_add_session(call: CallbackQuery, state: FSMContext):
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
-
     def iso(day, h):
         return (day + timedelta(hours=h)).isoformat()
-
     kb = InlineKeyboardMarkup(row_width=3)
-    kb.row(
-        InlineKeyboardButton('Сегодня 09:00', callback_data=f"slot:{cid}:{iso(today,9)}"),
-        InlineKeyboardButton('Сегодня 12:00', callback_data=f"slot:{cid}:{iso(today,12)}"),
-        InlineKeyboardButton('Сегодня 18:00', callback_data=f"slot:{cid}:{iso(today,18)}")
-    )
-    kb.row(
-        InlineKeyboardButton('Завтра 09:00', callback_data=f"slot:{cid}:{iso(tomorrow,9)}"),
-        InlineKeyboardButton('Завтра 12:00', callback_data=f"slot:{cid}:{iso(tomorrow,12)}"),
-        InlineKeyboardButton('Завтра 18:00', callback_data=f"slot:{cid}:{iso(tomorrow,18)}")
-    )
+    kb.row(InlineKeyboardButton('Сегодня 09:00', callback_data=f"slot:{cid}:{iso(today,9)}"),
+           InlineKeyboardButton('Сегодня 12:00', callback_data=f"slot:{cid}:{iso(today,12)}"),
+           InlineKeyboardButton('Сегодня 18:00', callback_data=f"slot:{cid}:{iso(today,18)}"))
+    kb.row(InlineKeyboardButton('Завтра 09:00', callback_data=f"slot:{cid}:{iso(tomorrow,9)}"),
+           InlineKeyboardButton('Завтра 12:00', callback_data=f"slot:{cid}:{iso(tomorrow,12)}"),
+           InlineKeyboardButton('Завтра 18:00', callback_data=f"slot:{cid}:{iso(tomorrow,18)}"))
     kb.add(InlineKeyboardButton('📝 Ввести вручную', callback_data='slot_manual'))
     await call.message.answer('Выберите слот или введите вручную:', reply_markup=kb)
     await AddSession.when.set()
@@ -654,7 +642,7 @@ async def cb_add_session(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('slot:'))
 async def cb_pick_slot(call: CallbackQuery, state: FSMContext):
-    _, cid, dt_iso = call.data.split(':', 2)
+    _ , cid, dt_iso = call.data.split(':', 2)
     await state.update_data(client_id=int(cid), when=datetime.fromisoformat(dt_iso))
     await AddSession.comment.set()
     await call.message.answer('Комментарий (или "-" чтобы пропустить):')
@@ -679,3 +667,187 @@ async def st_add_session_when(message: types.Message, state: FSMContext):
 @dp.message_handler(state=AddSession.comment)
 async def st_add_session_comment(message: types.Message, state: FSMContext):
     data = await state.get_data()
+    comment = '' if message.text.strip() == '-' else message.text.strip()
+    dt_iso = data['when'].isoformat()
+    cur.execute('INSERT INTO sessions (client_id, datetime, comment) VALUES (?, ?, ?)', (data['client_id'], dt_iso, comment))
+    conn.commit()
+    sid = cur.lastrowid
+    await state.finish()
+    await message.answer(f"Сессия добавлена (id={sid}) на {data['when'].strftime('%d.%m.%Y %H:%M')}", reply_markup=TRAINER_KB)
+
+# Платёж (тренер)
+@dp.callback_query_handler(lambda c: c.data.startswith('add_payment:'))
+async def cb_add_payment(call: CallbackQuery, state: FSMContext):
+    cid = int(call.data.split(':')[1])
+    tid = get_trainer_id_by_chat(call.message.chat.id)
+    cur.execute('SELECT trainer_id FROM clients WHERE id = ?', (cid,))
+    row = cur.fetchone()
+    if not row or row[0] != tid:
+        await call.answer('Этот клиент не ваш.', show_alert=True)
+        return
+    await state.update_data(client_id=cid)
+    await AddPayment.amount.set()
+    await call.message.answer('Введите сумму платежа:')
+    await call.answer()
+
+@dp.message_handler(state=AddPayment.amount)
+async def st_payment_amount(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text.replace(',', '.'))
+    except ValueError:
+        await message.answer('Введите число. Например: 1500')
+        return
+    await state.update_data(amount=amount)
+    await AddPayment.note.set()
+    await message.answer('Комментарий (или "-" чтобы пропустить):')
+
+@dp.message_handler(state=AddPayment.note)
+async def st_payment_note(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    note = '' if message.text.strip() == '-' else message.text.strip()
+    now = datetime.utcnow().isoformat()
+    cur.execute('INSERT INTO payments (client_id, amount, date, note) VALUES (?, ?, ?, ?)', (data['client_id'], data['amount'], now, note))
+    cur.execute('UPDATE clients SET balance = balance + ? WHERE id = ?', (data['amount'], data['client_id']))
+    conn.commit()
+    await state.finish()
+    await message.answer(f"Платёж записан: client={data['client_id']}, amount={data['amount']:.2f}", reply_markup=TRAINER_KB)
+
+# Расписание (тренер) с завершением сессий
+@dp.message_handler(lambda m: m.text == '📅 Расписание')
+async def trainer_schedule(message: types.Message):
+    tid = get_trainer_id_by_chat(message.chat.id)
+    if not tid:
+        await message.answer('Только для тренера.', reply_markup=CLIENT_KB)
+        return
+    now = datetime.utcnow()
+    end = now + timedelta(days=30)
+    cur.execute('''SELECT s.id, s.client_id, s.datetime, s.status, c.name
+                   FROM sessions s LEFT JOIN clients c ON s.client_id=c.id
+                   WHERE c.trainer_id = ? AND s.datetime BETWEEN ? AND ?
+                   ORDER BY s.datetime''', (tid, now.isoformat(), end.isoformat()))
+    rows = cur.fetchall()
+    if not rows:
+        await message.answer('Нет тренировок в ближайшие 30 дней.', reply_markup=TRAINER_KB)
+        return
+    kb = InlineKeyboardMarkup(row_width=1)
+    for sid, cid, dt_iso, status, cname in rows[:50]:
+        dt = datetime.fromisoformat(dt_iso).strftime('%d.%m %H:%M')
+        label = f"{sid}: {dt} — {cname} — {status}"
+        if status != 'completed':
+            kb.add(InlineKeyboardButton(f"✅ Завершить {label}", callback_data=f"done_session:{sid}"))
+        else:
+            kb.add(InlineKeyboardButton(f"✅ Завершено — {label}", callback_data="noop"))
+    await message.answer('Ваше расписание (30 дней):', reply_markup=kb)
+
+# Завершение сессии кнопкой
+@dp.callback_query_handler(lambda c: c.data.startswith('done_session:'))
+async def cb_done_session(call: CallbackQuery):
+    sid = int(call.data.split(':')[1])
+    tid = get_trainer_id_by_chat(call.message.chat.id)
+    cur.execute('''SELECT s.id FROM sessions s
+                   JOIN clients c ON s.client_id = c.id
+                   WHERE s.id = ? AND c.trainer_id = ?''', (sid, tid))
+    if not cur.fetchone():
+        await call.answer('Сессия не относится к вам.', show_alert=True)
+        return
+    cur.execute("UPDATE sessions SET status = 'completed' WHERE id = ?", (sid,))
+    conn.commit()
+    await call.answer('Готово ✅')
+
+# Команда завершить сессию (альтернатива)
+@dp.message_handler(commands=['complete_session'])
+async def complete_session_cmd(message: types.Message):
+    tid = get_trainer_id_by_chat(message.chat.id)
+    if not tid:
+        await message.answer('Только для тренера.', reply_markup=CLIENT_KB)
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer('Используй: /complete_session <id>', reply_markup=TRAINER_KB)
+        return
+    try:
+        sid = int(parts[1])
+    except ValueError:
+        await message.answer('Неверный id', reply_markup=TRAINER_KB)
+        return
+    cur.execute('''SELECT s.id FROM sessions s
+                   JOIN clients c ON s.client_id = c.id
+                   WHERE s.id = ? AND c.trainer_id = ?''', (sid, tid))
+    if not cur.fetchone():
+        await message.answer('Эта сессия не относится к вашим клиентам.', reply_markup=TRAINER_KB)
+        return
+    cur.execute('UPDATE sessions SET status = ? WHERE id = ?', ('completed', sid))
+    conn.commit()
+    await message.answer(f'Сессия {sid} помечена как выполненная', reply_markup=TRAINER_KB)
+
+# --- Background reminders ---
+async def reminders_loop():
+    logger.info('Reminders loop started')
+    while True:
+        try:
+            now = datetime.utcnow()
+            t24_from, t24_to = now + timedelta(hours=24), now + timedelta(hours=24, minutes=1)
+            t2_from, t2_to = now + timedelta(hours=2), now + timedelta(hours=2, minutes=1)
+
+            cur.execute('''SELECT s.id, s.client_id, s.datetime, s.comment, c.chat_id, c.name, c.trainer_id
+                           FROM sessions s
+                           JOIN clients c ON s.client_id=c.id
+                           WHERE s.remind24_sent = 0 AND s.status = 'planned' AND s.datetime BETWEEN ? AND ?''',
+                        (t24_from.isoformat(), t24_to.isoformat()))
+            for sid, cid, dt_iso, comment, client_chat, client_name, trainer_id in cur.fetchall():
+                dt = datetime.fromisoformat(dt_iso)
+                txt = f"Напоминание: тренировка {dt.strftime('%d.%m.%Y %H:%M')} — {client_name} (id={cid})."
+                if comment:
+                    txt += "\n" + comment
+                cur.execute('SELECT chat_id FROM trainers WHERE id = ?', (trainer_id,))
+                row = cur.fetchone()
+                if row:
+                    tchat = row[0]
+                    try:
+                        await bot.send_message(tchat, "За 24 часа — " + txt)
+                    except Exception:
+                        logger.exception('Failed send 24h to trainer')
+                if client_chat:
+                    try:
+                        await bot.send_message(client_chat, f"Привет! Напоминаем о тренировке {dt.strftime('%d.%m.%Y %H:%M')}.")
+                    except Exception:
+                        logger.exception('Failed send 24h to client')
+                cur.execute('UPDATE sessions SET remind24_sent = 1 WHERE id = ?', (sid,))
+                conn.commit()
+
+            cur.execute('''SELECT s.id, s.client_id, s.datetime, s.comment, c.chat_id, c.name, c.trainer_id
+                           FROM sessions s
+                           JOIN clients c ON s.client_id=c.id
+                           WHERE s.remind2_sent = 0 AND s.status = 'planned' AND s.datetime BETWEEN ? AND ?''',
+                        (t2_from.isoformat(), t2_to.isoformat()))
+            for sid, cid, dt_iso, comment, client_chat, client_name, trainer_id in cur.fetchall():
+                dt = datetime.fromisoformat(dt_iso)
+                txt = f"Напоминание: тренировка {dt.strftime('%d.%m.%Y %H:%M')} — {client_name} (id={cid})."
+                if comment:
+                    txt += "\n" + comment
+                cur.execute('SELECT chat_id FROM trainers WHERE id = ?', (trainer_id,))
+                row = cur.fetchone()
+                if row:
+                    tchat = row[0]
+                    try:
+                        await bot.send_message(tchat, "За 2 часа — " + txt)
+                    except Exception:
+                        logger.exception('Failed send 2h to trainer')
+                if client_chat:
+                    try:
+                        await bot.send_message(client_chat, f"Привет! Напоминаем о тренировке через 2 часа: {dt.strftime('%d.%m.%Y %H:%M')}.")
+                    except Exception:
+                        logger.exception('Failed send 2h to client')
+                cur.execute('UPDATE sessions SET remind2_sent = 1 WHERE id = ?', (sid,))
+                conn.commit()
+        except Exception:
+            logger.exception('Error in reminders loop')
+        await asyncio.sleep(60)
+
+async def on_startup(dp):
+    asyncio.create_task(reminders_loop())
+    logger.info('on_startup finished — reminders loop scheduled.')
+
+if __name__ == '__main__':
+    logger.info('Bot is starting...')
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
