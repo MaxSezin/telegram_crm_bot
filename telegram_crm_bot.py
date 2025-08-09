@@ -1,15 +1,11 @@
 """
-Telegram CRM для тренеров — Расширенный MVP с ролями и заявками (кнопки)
-Автор: сгенерировано ChatGPT
+Telegram CRM для тренеров — Расширенный MVP
 
-Ключевые возможности:
-- Разделение ролей: Тренер / Клиент (выбор при /start)
-- Для клиента: выбор тренера из списка, создание заявки, уведомление тренеру
-- Для тренера: список заявок (одобрить/отклонить), свои клиенты, расписание, платежи, статистика
-- Поддержка множества тренеров и их независимых групп клиентов
-- Напоминания за 24ч и 2ч — только соответствующему тренеру и клиенту
-- Полностью на кнопках (ReplyKeyboard + InlineKeyboard), формы через FSM
-- Дополнения: быстрый поиск тренера/клиента, завершение сессии кнопкой, редактирование профиля клиента, авто-слоты времени (сегодня/завтра 9/12/18)
+Дополнения:
+- Ручной ввод даты: явное сообщение и пример формата (ДД.ММ.ГГГГ ЧЧ:ММ, 24ч)
+- Профиль тренера: город + тарифы/пакеты; клиент видит в «ℹ️ Мой тренер»
+- Автосбор Telegram-профиля (id, username, first/last/full name) у тренеров и клиентов
+- Поиск тренера с выбором города (список крупных городов РФ, пагинация)
 
 Зависимости:
     pip install aiogram==2.25 python-dateutil
@@ -49,7 +45,20 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 DB_FILE = 'crm.db'
 
-# --- Database init ---
+# --- Cities (крупные города РФ + 'Другой') ---
+CITIES = [
+    'Москва','Санкт-Петербург','Новосибирск','Екатеринбург','Казань','Нижний Новгород','Челябинск','Самара','Омск','Ростов-на-Дону',
+    'Уфа','Красноярск','Воронеж','Пермь','Волгоград','Краснодар','Саратов','Тюмень','Тольятти','Ижевск',
+    'Барнаул','Иркутск','Ульяновск','Хабаровск','Ярославль','Владивосток','Махачкала','Томск','Оренбург','Кемерово',
+    'Новокузнецк','Рязань','Астрахань','Набережные Челны','Пенза','Липецк','Киров','Чебоксары','Балашиха','Калининград',
+    'Тула','Курск','Ставрополь','Севастополь','Улан-Удэ','Тверь','Магнитогорск','Иваново','Брянск','Сочи',
+    'Белгород','Сургут','Владимир','Чита','Архангельск','Нижний Тагил','Калуга','Симферополь','Смоленск','Якутск',
+    'Курган','Орёл','Череповец','Вологда','Подольск','Йошкар-Ола','Тамбов','Кострома','Новороссийск','Комсомольск-на-Амуре',
+    'Другой'
+]
+CITY_PAGE = 12
+
+# --- DB init ---
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cur = conn.cursor()
 
@@ -57,7 +66,13 @@ cur.execute('''CREATE TABLE IF NOT EXISTS trainers (
     id INTEGER PRIMARY KEY,
     chat_id INTEGER UNIQUE,
     name TEXT,
-    created_at TEXT
+    created_at TEXT,
+    city TEXT,
+    pricing TEXT,
+    tg_id INTEGER,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT
 )''')
 
 cur.execute('''CREATE TABLE IF NOT EXISTS clients (
@@ -68,7 +83,11 @@ cur.execute('''CREATE TABLE IF NOT EXISTS clients (
     balance REAL DEFAULT 0,
     chat_id INTEGER,
     trainer_id INTEGER,
-    status TEXT DEFAULT 'approved', -- pending/approved/rejected
+    status TEXT DEFAULT 'approved',
+    tg_id INTEGER,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
     FOREIGN KEY(trainer_id) REFERENCES trainers(id)
 )''')
 
@@ -93,32 +112,40 @@ cur.execute('''CREATE TABLE IF NOT EXISTS payments (
 )''')
 conn.commit()
 
-# Миграции на случай старой БД
-try:
-    cur.execute("ALTER TABLE clients ADD COLUMN trainer_id INTEGER")
-except Exception:
-    pass
-try:
-    cur.execute("ALTER TABLE clients ADD COLUMN status TEXT DEFAULT 'approved'")
-except Exception:
-    pass
+# Миграции (мягкие)
+for ddl in [
+    "ALTER TABLE trainers ADD COLUMN city TEXT",
+    "ALTER TABLE trainers ADD COLUMN pricing TEXT",
+    "ALTER TABLE trainers ADD COLUMN tg_id INTEGER",
+    "ALTER TABLE trainers ADD COLUMN username TEXT",
+    "ALTER TABLE trainers ADD COLUMN first_name TEXT",
+    "ALTER TABLE trainers ADD COLUMN last_name TEXT",
+    "ALTER TABLE clients ADD COLUMN tg_id INTEGER",
+    "ALTER TABLE clients ADD COLUMN username TEXT",
+    "ALTER TABLE clients ADD COLUMN first_name TEXT",
+    "ALTER TABLE clients ADD COLUMN last_name TEXT"
+]:
+    try:
+        cur.execute(ddl)
+    except Exception:
+        pass
 conn.commit()
 
-# --- Helpers & Keyboards ---
+# --- Keyboards ---
 PER_PAGE = 10
 
 TRAINER_KB = ReplyKeyboardMarkup(resize_keyboard=True)
 TRAINER_KB.row(KeyboardButton('📋 Мои клиенты'), KeyboardButton('📝 Заявки'))
 TRAINER_KB.row(KeyboardButton('➕ Добавить клиента'), KeyboardButton('📅 Расписание'))
 TRAINER_KB.row(KeyboardButton('💸 Должники'), KeyboardButton('📈 Статистика'))
+TRAINER_KB.row(KeyboardButton('⚙️ Профиль'))
 
 CLIENT_KB = ReplyKeyboardMarkup(resize_keyboard=True)
 CLIENT_KB.row(KeyboardButton('🧑‍🏫 Выбрать тренера'), KeyboardButton('📅 Мои тренировки'))
-CLIENT_KB.row(KeyboardButton('💸 Мой баланс'))
+CLIENT_KB.row(KeyboardButton('💸 Мой баланс'), KeyboardButton('ℹ️ Мой тренер'))
 
 ROLE_KB = ReplyKeyboardMarkup(resize_keyboard=True)
 ROLE_KB.row(KeyboardButton('Я тренер'), KeyboardButton('Я клиент'))
-
 
 def parse_dt(text: str) -> datetime:
     text = text.strip()
@@ -138,31 +165,25 @@ def parse_dt(text: str) -> datetime:
                     return dt
         except Exception:
             pass
-    raise ValueError("Не удалось распознать дату. Пример: 12.08.2025 18:00")
+    raise ValueError("Не удалось распознать дату. Формат: ДД.ММ.ГГГГ ЧЧ:ММ, пример: 12.08.2025 18:00")
 
-
-def get_trainer_chat_ids():
-    cur.execute("SELECT chat_id FROM trainers")
-    return [r[0] for r in cur.fetchall()]
-
-
-def ensure_trainer(chat_id: int, name: str = None):
+def ensure_trainer(chat_id: int, user: types.User):
     cur.execute("SELECT id FROM trainers WHERE chat_id = ?", (chat_id,))
     if cur.fetchone() is None:
-        cur.execute("INSERT INTO trainers (chat_id, name, created_at) VALUES (?, ?, ?)", (chat_id, name or 'trainer', datetime.utcnow().isoformat()))
+        cur.execute(
+            "INSERT INTO trainers (chat_id, name, created_at, tg_id, username, first_name, last_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, user.full_name or 'trainer', datetime.utcnow().isoformat(), user.id, user.username, user.first_name, user.last_name)
+        )
         conn.commit()
-
 
 def get_trainer_id_by_chat(chat_id: int):
     cur.execute("SELECT id FROM trainers WHERE chat_id = ?", (chat_id,))
     row = cur.fetchone()
     return row[0] if row else None
 
-
 def get_client_by_chat(chat_id: int):
-    cur.execute("SELECT id, name, phone, trainer_id, status, balance FROM clients WHERE chat_id = ?", (chat_id,))
+    cur.execute("SELECT id, name, phone, trainer_id, status, balance, tg_id, username FROM clients WHERE chat_id = ?", (chat_id,))
     return cur.fetchone()
-
 
 def get_role(chat_id: int) -> str:
     if get_trainer_id_by_chat(chat_id):
@@ -171,15 +192,17 @@ def get_role(chat_id: int) -> str:
         return 'client'
     return 'none'
 
-
-def build_trainers_kb(page: int = 0) -> InlineKeyboardMarkup:
-    cur.execute('SELECT id, name, chat_id FROM trainers ORDER BY id')
+def build_trainers_kb(page: int = 0, city: str = None) -> InlineKeyboardMarkup:
+    if city and city != 'Другой':
+        cur.execute('SELECT id, name FROM trainers WHERE city = ? ORDER BY id', (city,))
+    else:
+        cur.execute('SELECT id, name FROM trainers ORDER BY id')
     all_rows = cur.fetchall()
     start = page * PER_PAGE
     end = start + PER_PAGE
     rows = all_rows[start:end]
     kb = InlineKeyboardMarkup(row_width=1)
-    for tid, name, tchat in rows:
+    for tid, name in rows:
         title = name or f"Тренер {tid}"
         kb.add(InlineKeyboardButton(f"{tid}. {title}", callback_data=f"pick_trainer:{tid}"))
     nav = []
@@ -191,7 +214,6 @@ def build_trainers_kb(page: int = 0) -> InlineKeyboardMarkup:
         kb.row(*nav)
     kb.add(InlineKeyboardButton('🔎 Поиск тренера', callback_data='search_trainers'))
     return kb
-
 
 def build_clients_kb_for_trainer(trainer_id: int, page: int = 0) -> InlineKeyboardMarkup:
     cur.execute('SELECT id, name FROM clients WHERE trainer_id = ? AND status = ? ORDER BY id', (trainer_id, 'approved'))
@@ -212,7 +234,6 @@ def build_clients_kb_for_trainer(trainer_id: int, page: int = 0) -> InlineKeyboa
     kb.add(InlineKeyboardButton('🔎 Поиск клиента', callback_data='search_clients'))
     return kb
 
-
 def build_client_card_kb(cid: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     kb.row(
@@ -225,7 +246,6 @@ def build_client_card_kb(cid: int) -> InlineKeyboardMarkup:
     )
     kb.add(InlineKeyboardButton('🔗 Привязать чат', callback_data=f"link_client:{cid}"))
     return kb
-
 
 def build_requests_kb(trainer_id: int, page: int = 0) -> InlineKeyboardMarkup:
     cur.execute('SELECT id, name, phone FROM clients WHERE trainer_id = ? AND status = ? ORDER BY id', (trainer_id, 'pending'))
@@ -245,6 +265,22 @@ def build_requests_kb(trainer_id: int, page: int = 0) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton('⬅️ Назад', callback_data=f"req_page:{page-1}"))
     if end < len(all_rows):
         nav.append(InlineKeyboardButton('Вперёд ➡️', callback_data=f"req_page:{page+1}"))
+    if nav:
+        kb.row(*nav)
+    return kb
+
+def build_cities_kb(page: int = 0) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    start = page * CITY_PAGE
+    end = start + CITY_PAGE
+    rows = CITIES[start:end]
+    for city in rows:
+        kb.add(InlineKeyboardButton(city, callback_data=f"pick_city:{city}"))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton('⬅️ Назад', callback_data=f"city_page:{page-1}"))
+    if end < len(CITIES):
+        nav.append(InlineKeyboardButton('Вперёд ➡️', callback_data=f"city_page:{page+1}"))
     if nav:
         kb.row(*nav)
     return kb
@@ -280,6 +316,10 @@ class EditClient(StatesGroup):
     field = State()
     value = State()
 
+class EditTrainerProfile(StatesGroup):
+    field = State()
+    value = State()
+
 # --- Commands & Role entry ---
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
@@ -296,16 +336,16 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     role = get_role(message.chat.id)
     if role == 'trainer':
-        await message.answer("Доступно: 📋 Мои клиенты, 📝 Заявки, ➕ Добавить клиента, 📅 Расписание, 💸 Должники, 📈 Статистика", reply_markup=TRAINER_KB)
+        await message.answer("Доступно: 📋 Мои клиенты, 📝 Заявки, ➕ Добавить клиента, 📅 Расписание, 💸 Должники, 📈 Статистика, ⚙️ Профиль", reply_markup=TRAINER_KB)
     elif role == 'client':
-        await message.answer("Доступно: 🧑‍🏫 Выбрать тренера, 📅 Мои тренировки, 💸 Мой баланс", reply_markup=CLIENT_KB)
+        await message.answer("Доступно: 🧑‍🏫 Выбрать тренера, 📅 Мои тренировки, 💸 Мой баланс, ℹ️ Мой тренер", reply_markup=CLIENT_KB)
     else:
         await message.answer("Нажмите: Я тренер / Я клиент", reply_markup=ROLE_KB)
 
 # --- Role choose ---
 @dp.message_handler(lambda m: m.text == 'Я тренер')
 async def i_am_trainer(message: types.Message):
-    ensure_trainer(message.chat.id, message.from_user.full_name)
+    ensure_trainer(message.chat.id, message.from_user)
     await message.answer('Чат зарегистрирован как тренер ✅', reply_markup=TRAINER_KB)
 
 @dp.message_handler(lambda m: m.text == 'Я клиент')
@@ -314,29 +354,35 @@ async def i_am_client(message: types.Message, state: FSMContext):
     if client:
         await message.answer('Вы уже зарегистрированы как клиент.', reply_markup=CLIENT_KB)
         return
-    await ClientOnboard.name.set()
-    await message.answer('Введите ваше имя:', reply_markup=types.ReplyKeyboardRemove())
-
-@dp.message_handler(state=ClientOnboard.name)
-async def onboard_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text.strip())
-    await ClientOnboard.phone.set()
-    await message.answer('Введите ваш телефон:')
-
-@dp.message_handler(state=ClientOnboard.phone)
-async def onboard_phone(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    name = data['name']
-    phone = message.text.strip()
-    cur.execute('INSERT INTO clients (name, phone, chat_id, status) VALUES (?, ?, ?, ?)', (name, phone, message.chat.id, 'pending'))
+    # сохраняем базовые поля из Telegram профиля сразу (без ввода)
+    cur.execute(
+        'INSERT INTO clients (name, phone, chat_id, status, tg_id, username, first_name, last_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        (message.from_user.full_name, '', message.chat.id, 'pending', message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
+    )
     conn.commit()
     await state.finish()
-    await message.answer('Выберите тренера из списка ниже:', reply_markup=build_trainers_kb(0))
+    # выбор города перед списком тренеров
+    await message.answer('Выберите город:', reply_markup=build_cities_kb(0))
+
+# --- City choose for trainer search (client) ---
+@dp.callback_query_handler(lambda c: c.data.startswith('city_page:'))
+async def cb_city_page(call: CallbackQuery):
+    page = int(call.data.split(':')[1])
+    await call.message.edit_text('Выберите город:')
+    await call.message.edit_reply_markup(build_cities_kb(page))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('pick_city:'))
+async def cb_pick_city(call: CallbackQuery):
+    city = call.data.split(':', 1)[1]
+    await call.message.edit_text(f'Город: {city}. Выберите тренера:')
+    await call.message.edit_reply_markup(build_trainers_kb(0, city=city))
+    await call.answer()
 
 # --- Client actions ---
 @dp.message_handler(lambda m: m.text == '🧑‍🏫 Выбрать тренера')
 async def client_pick_trainer(message: types.Message):
-    await message.answer('Выберите тренера:', reply_markup=build_trainers_kb(0))
+    await message.answer('Выберите город:', reply_markup=build_cities_kb(0))
 
 @dp.callback_query_handler(lambda c: c.data == 'search_trainers')
 async def cb_search_trainers(call: CallbackQuery, state: FSMContext):
@@ -371,8 +417,8 @@ async def cb_pick_trainer(call: CallbackQuery):
     tid = int(call.data.split(':')[1])
     cur.execute('UPDATE clients SET trainer_id = ?, status = ? WHERE chat_id = ?', (tid, 'pending', call.message.chat.id))
     conn.commit()
-    cur.execute('SELECT name, phone, id FROM clients WHERE chat_id = ?', (call.message.chat.id,))
-    cname, cphone, cid = cur.fetchone()
+    cur.execute('SELECT name, phone, id, tg_id, username FROM clients WHERE chat_id = ?', (call.message.chat.id,))
+    cname, cphone, cid, ctg, cuser = cur.fetchone()
     cur.execute('SELECT chat_id, name FROM trainers WHERE id = ?', (tid,))
     trow = cur.fetchone()
     tchat, tname = (trow[0], trow[1]) if trow else (None, 'тренер')
@@ -384,13 +430,35 @@ async def cb_pick_trainer(call: CallbackQuery):
         try:
             await bot.send_message(
                 tchat,
-                f"Новая заявка от клиента:\n{cid}. {cname} — {cphone}",
+                f"Новая заявка от клиента:\n{cid}. {cname} — {cphone or 'телефон не указан'}\nTG: @{cuser or '-'} (id={ctg})",
                 reply_markup=kb
             )
         except Exception:
             logger.exception('Не удалось отправить заявку тренеру')
     await call.message.edit_text(f"Заявка отправлена тренеру {tname}. Ожидайте подтверждения.")
     await call.answer()
+
+@dp.message_handler(lambda m: m.text == 'ℹ️ Мой тренер')
+async def my_trainer_info(message: types.Message):
+    cur.execute('SELECT trainer_id FROM clients WHERE chat_id = ? AND status = "approved"', (message.chat.id,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        await message.answer('Тренер не выбран или заявка ещё не одобрена.')
+        return
+    tid = row[0]
+    cur.execute('SELECT name, city, pricing, tg_id, username FROM trainers WHERE id = ?', (tid,))
+    t = cur.fetchone()
+    if not t:
+        await message.answer('Информация о тренере недоступна.')
+        return
+    name, city, pricing, tg_id, username = t
+    text = (
+        f"Ваш тренер: {name}\n"
+        f"Город: {city or '-'}\n"
+        f"Тарифы/пакеты: {pricing or '-'}\n"
+        f"Telegram: @{username or '-'} (id={tg_id})"
+    )
+    await message.answer(text, reply_markup=CLIENT_KB)
 
 @dp.message_handler(lambda m: m.text == '📅 Мои тренировки')
 async def my_sessions(message: types.Message):
@@ -402,12 +470,18 @@ async def my_sessions(message: types.Message):
     cid = row[0]
     now = datetime.utcnow()
     end = now + timedelta(days=60)
-    cur.execute('SELECT id, datetime, status, comment FROM sessions WHERE client_id = ? AND datetime BETWEEN ? AND ? ORDER BY datetime', (cid, now.isoformat(), end.isoformat()))
+    cur.execute(
+        'SELECT id, datetime, status, comment FROM sessions WHERE client_id = ? AND datetime BETWEEN ? AND ? ORDER BY datetime',
+        (cid, now.isoformat(), end.isoformat())
+    )
     rows = cur.fetchall()
     if not rows:
         await message.answer('Пока нет запланированных тренировок.', reply_markup=CLIENT_KB)
         return
-    text = "\n".join([f"{r[0]}. {datetime.fromisoformat(r[1]).strftime('%d.%m.%Y %H:%M')} — {r[2]} — {r[3] or ''}" for r in rows])
+    text = "\n".join([
+        f"{r[0]}. {datetime.fromisoformat(r[1]).strftime('%d.%m.%Y %H:%M')} — {r[2]} — {r[3] or ''}"
+        for r in rows
+    ])
     await message.answer(text, reply_markup=CLIENT_KB)
 
 @dp.message_handler(lambda m: m.text == '💸 Мой баланс')
@@ -437,27 +511,62 @@ async def my_clients(message: types.Message):
         return
     await message.answer('Ваши клиенты:', reply_markup=build_clients_kb_for_trainer(tid, 0))
 
-@dp.callback_query_handler(lambda c: c.data == 'search_clients')
-async def cb_search_clients(call: CallbackQuery, state: FSMContext):
-    await SearchClient.query.set()
-    await call.message.answer('Введите часть имени клиента для поиска:')
+@dp.message_handler(lambda m: m.text == '⚙️ Профиль')
+async def trainer_profile(message: types.Message):
+    tid = get_trainer_id_by_chat(message.chat.id)
+    if not tid:
+        await message.answer('Вы не тренер.')
+        return
+    cur.execute('SELECT name, city, pricing, tg_id, username FROM trainers WHERE id = ?', (tid,))
+    name, city, pricing, tg_id, username = cur.fetchone()
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.row(
+        InlineKeyboardButton('🏙️ Изменить город', callback_data='tprof:city'),
+        InlineKeyboardButton('💰 Тарифы/пакеты', callback_data='tprof:pricing')
+    )
+    text = (
+        f"Профиль тренера: {name}\n"
+        f"Город: {city or '-'}\n"
+        f"Тарифы/пакеты: {pricing or '-'}\n"
+        f"Telegram: @{username or '-'} (id={tg_id})"
+    )
+    await message.answer(text, reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data.startswith('tprof:'))
+async def cb_tprof(call: CallbackQuery, state: FSMContext):
+    what = call.data.split(':')[1]
+    await EditTrainerProfile.field.set()
+    await state.update_data(field=what)
+    if what == 'city':
+        await call.message.answer('Выберите ваш город:', reply_markup=build_cities_kb(0))
+    else:
+        await EditTrainerProfile.value.set()  # ВАЖНО: ставим состояние для ввода текста тарифов
+        await call.message.answer('Введите описание тарифов/пакетов (текстом):')
     await call.answer()
 
-@dp.message_handler(state=SearchClient.query)
-async def st_search_clients_query(message: types.Message, state: FSMContext):
-    tid = get_trainer_id_by_chat(message.chat.id)
-    q = f"%{message.text.strip()}%"
-    cur.execute('SELECT id, name FROM clients WHERE trainer_id = ? AND status = ? AND name LIKE ? ORDER BY id LIMIT 50', (tid, 'approved', q))
-    rows = cur.fetchall()
-    if not rows:
-        await message.answer('Ничего не найдено. Попробуйте ещё раз или откройте список клиентов кнопкой.')
-        await state.finish()
-        return
-    kb = InlineKeyboardMarkup(row_width=1)
-    for cid, name in rows:
-        kb.add(InlineKeyboardButton(f"{cid}. {name}", callback_data=f"client:{cid}"))
-    await message.answer('Результаты поиска:', reply_markup=kb)
+@dp.callback_query_handler(lambda c: c.data.startswith('pick_city:'), state=EditTrainerProfile.field)
+async def cb_set_city(call: CallbackQuery, state: FSMContext):
+    city = call.data.split(':', 1)[1]
+    tid = get_trainer_id_by_chat(call.message.chat.id)
+    cur.execute('UPDATE trainers SET city = ? WHERE id = ?', (city, tid))
+    conn.commit()
     await state.finish()
+    await call.message.answer(f'Город обновлён: {city}', reply_markup=TRAINER_KB)
+    await call.answer()
+
+@dp.message_handler(state=EditTrainerProfile.value)
+async def st_tprof_value(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get('field')
+    tid = get_trainer_id_by_chat(message.chat.id)
+    if field == 'pricing':
+        cur.execute('UPDATE trainers SET pricing = ? WHERE id = ?', (message.text.strip(), tid))
+        conn.commit()
+        await state.finish()
+        await message.answer('Тарифы/пакеты обновлены ✅', reply_markup=TRAINER_KB)
+    else:
+        await state.finish()
+        await message.answer('Неверный шаг.', reply_markup=TRAINER_KB)
 
 @dp.message_handler(lambda m: m.text == '📝 Заявки')
 async def my_requests(message: types.Message):
@@ -519,7 +628,7 @@ async def cb_reject(call: CallbackQuery):
 async def cb_client_card(call: CallbackQuery):
     cid = int(call.data.split(':')[1])
     tid = get_trainer_id_by_chat(call.message.chat.id)
-    cur.execute('SELECT id, name, phone, notes, balance, chat_id, trainer_id, status FROM clients WHERE id = ?', (cid,))
+    cur.execute('SELECT id, name, phone, notes, balance, chat_id, trainer_id, status, tg_id, username FROM clients WHERE id = ?', (cid,))
     r = cur.fetchone()
     if not r:
         await call.answer('Клиент не найден', show_alert=True)
@@ -527,13 +636,16 @@ async def cb_client_card(call: CallbackQuery):
     if r[6] != tid:
         await call.answer('Этот клиент не относится к вам.', show_alert=True)
         return
-    text = (f"ID: {r[0]}\n"
-            f"Имя: {r[1]}\n"
-            f"Телефон: {r[2]}\n"
-            f"Примечание: {r[3]}\n"
-            f"Баланс: {r[4]:.2f}\n"
-            f"Chat_id: {r[5]}\n"
-            f"Статус: {r[7]}")
+    text = (
+        f"ID: {r[0]}\n"
+        f"Имя: {r[1]}\n"
+        f"Телефон: {r[2]}\n"
+        f"Примечание: {r[3]}\n"
+        f"Баланс: {r[4]:.2f}\n"
+        f"Chat_id: {r[5]}\n"
+        f"TG: @{r[9] or '-'} (id={r[8]})\n"
+        f"Статус: {r[7]}"
+    )
     await call.message.edit_text(text)
     if r[7] == 'approved':
         await call.message.edit_reply_markup(build_client_card_kb(cid))
@@ -553,9 +665,11 @@ async def cb_edit_client(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(client_id=cid)
     kb = InlineKeyboardMarkup(row_width=3)
-    kb.row(InlineKeyboardButton('Имя', callback_data='edit_field:name'),
-           InlineKeyboardButton('Телефон', callback_data='edit_field:phone'),
-           InlineKeyboardButton('Заметка', callback_data='edit_field:notes'))
+    kb.row(
+        InlineKeyboardButton('Имя', callback_data='edit_field:name'),
+        InlineKeyboardButton('Телефон', callback_data='edit_field:phone'),
+        InlineKeyboardButton('Заметка', callback_data='edit_field:notes')
+    )
     await call.message.answer('Что изменить?', reply_markup=kb)
     await call.answer()
 
@@ -609,7 +723,8 @@ async def add_client_notes(message: types.Message, state: FSMContext):
     notes = '' if message.text.strip() == '-' else message.text.strip()
     data = await state.get_data()
     tid = get_trainer_id_by_chat(message.chat.id)
-    cur.execute('INSERT INTO clients (name, phone, notes, trainer_id, status) VALUES (?, ?, ?, ?, ?)', (data['name'], data['phone'], notes, tid, 'approved'))
+    cur.execute('INSERT INTO clients (name, phone, notes, trainer_id, status) VALUES (?, ?, ?, ?, ?)',
+                (data['name'], data['phone'], notes, tid, 'approved'))
     conn.commit()
     cid = cur.lastrowid
     await state.finish()
@@ -629,15 +744,21 @@ async def cb_add_session(call: CallbackQuery, state: FSMContext):
     now = datetime.utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = today + timedelta(days=1)
+
     def iso(day, h):
         return (day + timedelta(hours=h)).isoformat()
+
     kb = InlineKeyboardMarkup(row_width=3)
-    kb.row(InlineKeyboardButton('Сегодня 09:00', callback_data=f"slot:{cid}:{iso(today,9)}"),
-           InlineKeyboardButton('Сегодня 12:00', callback_data=f"slot:{cid}:{iso(today,12)}"),
-           InlineKeyboardButton('Сегодня 18:00', callback_data=f"slot:{cid}:{iso(today,18)}"))
-    kb.row(InlineKeyboardButton('Завтра 09:00', callback_data=f"slot:{cid}:{iso(tomorrow,9)}"),
-           InlineKeyboardButton('Завтра 12:00', callback_data=f"slot:{cid}:{iso(tomorrow,12)}"),
-           InlineKeyboardButton('Завтра 18:00', callback_data=f"slot:{cid}:{iso(tomorrow,18)}"))
+    kb.row(
+        InlineKeyboardButton('Сегодня 09:00', callback_data=f"slot:{cid}:{iso(today,9)}"),
+        InlineKeyboardButton('Сегодня 12:00', callback_data=f"slot:{cid}:{iso(today,12)}"),
+        InlineKeyboardButton('Сегодня 18:00', callback_data=f"slot:{cid}:{iso(today,18)}")
+    )
+    kb.row(
+        InlineKeyboardButton('Завтра 09:00', callback_data=f"slot:{cid}:{iso(tomorrow,9)}"),
+        InlineKeyboardButton('Завтра 12:00', callback_data=f"slot:{cid}:{iso(tomorrow,12)}"),
+        InlineKeyboardButton('Завтра 18:00', callback_data=f"slot:{cid}:{iso(tomorrow,18)}")
+    )
     kb.add(InlineKeyboardButton('📝 Ввести вручную', callback_data='slot_manual'))
     await call.message.answer('Выберите слот или введите вручную:', reply_markup=kb)
     await AddSession.when.set()
@@ -645,7 +766,7 @@ async def cb_add_session(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('slot:'))
 async def cb_pick_slot(call: CallbackQuery, state: FSMContext):
-    _ , cid, dt_iso = call.data.split(':', 2)
+    _, cid, dt_iso = call.data.split(':', 2)
     await state.update_data(client_id=int(cid), when=datetime.fromisoformat(dt_iso))
     await AddSession.comment.set()
     await call.message.answer('Комментарий (или "-" чтобы пропустить):')
@@ -653,7 +774,7 @@ async def cb_pick_slot(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data == 'slot_manual')
 async def cb_slot_manual(call: CallbackQuery):
-    await call.message.answer('Введите дату/время вручную (например: 12.08 18:00):')
+    await call.message.answer('Ожидаю ввод даты и времени в формате: ДД.ММ.ГГГГ ЧЧ:ММ (24ч).\nНапример: 12.08.2025 18:00')
     await call.answer()
 
 @dp.message_handler(state=AddSession.when)
@@ -661,7 +782,7 @@ async def st_add_session_when(message: types.Message, state: FSMContext):
     try:
         dt = parse_dt(message.text)
     except Exception:
-        await message.answer('Не удалось распознать дату. Пример: 12.08.2025 18:00')
+        await message.answer('Не удалось распознать дату. Формат: ДД.ММ.ГГГГ ЧЧ:ММ. Пример: 12.08.2025 18:00')
         return
     await state.update_data(when=dt)
     await AddSession.comment.set()
@@ -672,7 +793,8 @@ async def st_add_session_comment(message: types.Message, state: FSMContext):
     data = await state.get_data()
     comment = '' if message.text.strip() == '-' else message.text.strip()
     dt_iso = data['when'].isoformat()
-    cur.execute('INSERT INTO sessions (client_id, datetime, comment) VALUES (?, ?, ?)', (data['client_id'], dt_iso, comment))
+    cur.execute('INSERT INTO sessions (client_id, datetime, comment) VALUES (?, ?, ?)',
+                (data['client_id'], dt_iso, comment))
     conn.commit()
     sid = cur.lastrowid
     await state.finish()
@@ -709,11 +831,14 @@ async def st_payment_note(message: types.Message, state: FSMContext):
     data = await state.get_data()
     note = '' if message.text.strip() == '-' else message.text.strip()
     now = datetime.utcnow().isoformat()
-    cur.execute('INSERT INTO payments (client_id, amount, date, note) VALUES (?, ?, ?, ?)', (data['client_id'], data['amount'], now, note))
-    cur.execute('UPDATE clients SET balance = balance + ? WHERE id = ?', (data['amount'], data['client_id']))
+    cur.execute('INSERT INTO payments (client_id, amount, date, note) VALUES (?, ?, ?, ?)',
+                (data['client_id'], data['amount'], now, note))
+    cur.execute('UPDATE clients SET balance = balance + ? WHERE id = ?',
+                (data['amount'], data['client_id']))
     conn.commit()
     await state.finish()
-    await message.answer(f"Платёж записан: client={data['client_id']}, amount={data['amount']:.2f}", reply_markup=TRAINER_KB)
+    await message.answer(f"Платёж записан: client={data['client_id']}, amount={data['amount']:.2f}",
+                         reply_markup=TRAINER_KB)
 
 # Расписание (тренер) с завершением сессий
 @dp.message_handler(lambda m: m.text == '📅 Расписание')
@@ -733,7 +858,7 @@ async def trainer_schedule(message: types.Message):
         await message.answer('Нет тренировок в ближайшие 30 дней.', reply_markup=TRAINER_KB)
         return
     kb = InlineKeyboardMarkup(row_width=1)
-    for sid, cid, dt_iso, status, cname in rows[:50]:
+    for sid, _, dt_iso, status, cname in rows[:50]:
         dt = datetime.fromisoformat(dt_iso).strftime('%d.%m %H:%M')
         label = f"{sid}: {dt} — {cname} — {status}"
         if status != 'completed':
