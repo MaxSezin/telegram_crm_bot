@@ -26,7 +26,7 @@ from aiogram.utils import executor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-API_TOKEN = os.getenv('BOT_TOKEN', '8235146977:AAFlcjiVT-LBfOJBAfOYi2_A99C-c6-4QyI')
+API_TOKEN = os.getenv("BOT_TOKEN")
 if not API_TOKEN:
     logger.warning("Переменная окружения BOT_TOKEN не установлена. Подставь токен в переменной окружения перед запуском.")
     # Не ставим явный токен сюда — безопасность.
